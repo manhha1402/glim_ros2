@@ -16,7 +16,12 @@ option(BUILD_WITH_CV_BRIDGE "Build with cv_bridge which enables support for proc
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
+find_package(generate_parameter_library REQUIRED)
 find_package(glim REQUIRED)
+
+generate_parameter_library(vm_glim_parameters
+  params/vm_glim_parameters.yaml
+)
 find_package(Boost REQUIRED COMPONENTS program_options)
 
 if(DEFINED GLIM_USE_OPENCV AND NOT GLIM_USE_OPENCV AND BUILD_WITH_CV_BRIDGE)
@@ -31,6 +36,9 @@ endif()
 if(BUILD_WITH_CUDA)
   add_definitions(-DBUILD_GTSAM_POINTS_GPU)
 endif()
+
+
+
 
 set(OLD_DISTRO "humble;galactic;foxy")
 if($ENV{ROS_DISTRO} IN_LIST OLD_DISTRO)
@@ -56,6 +64,21 @@ ament_auto_add_library(rviz_viewer SHARED
   src/glim_ros/rviz_viewer.cpp
 )
 
+### vm_glim ###
+ament_auto_add_library(vm_glim SHARED
+  src/glim_ros/vm_glim.cpp
+  src/glim_ros/ros_qos.cpp
+)
+target_include_directories(vm_glim PUBLIC
+  include
+)
+target_link_libraries(vm_glim
+  glim::glim
+  vm_glim_parameters
+)
+rclcpp_components_register_nodes(vm_glim "glim::VMGlim")
+
+
 ### glim_rosnode ###
 ament_auto_add_executable(glim_rosnode
   src/glim_rosnode.cpp
@@ -72,6 +95,14 @@ target_link_libraries(glim_rosbag
   glim_ros
 )
 
+
+### vm_glim_node ###
+ament_auto_add_executable(vm_glim_node
+  src/vm_glim_node.cpp
+)
+target_link_libraries(vm_glim_node
+vm_glim
+)
 ### validator_node ###
 ament_auto_add_executable(validator_node
   src/validator_node.cpp

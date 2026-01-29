@@ -1,0 +1,95 @@
+# VM GLIM node parameters (generate_parameter_library schema)
+# Root key 'vm_glim' becomes C++ namespace vm_glim
+# glim_ros section mirrors config_ros.json "glim_ros"
+vm_glim:
+  debug:
+    type: bool
+    default_value: false
+    description: "Enable debug printing and file logging"
+  dump_on_unload:
+    type: bool
+    default_value: false
+    description: "Dump map to /tmp/dump on node shutdown"
+  config_path:
+    type: string
+    default_value: "config"
+    description: "Path to glim config directory (relative to glim share, or absolute)"
+
+  # Backend modules
+  enable_local_mapping:
+    type: bool
+    default_value: true
+    description: "Enable local mapping module"
+  enable_global_mapping:
+    type: bool
+    default_value: true
+    description: "Enable global mapping module"
+  # Points config
+  keep_raw_points:
+    type: bool
+    default_value: false
+    description: "Keep raw points in the map (required for extension modules)"
+  # IMU config
+  imu_time_offset:
+    type: double
+    default_value: 0.0
+    description: "Time offset for IMU data (seconds)"
+  points_time_offset:
+    type: double
+    default_value: 0.0
+    description: "Time offset for point cloud data (seconds)"
+  acc_scale:
+    type: double
+    default_value: 1.0
+    description: "Accelerometer scale factor (e.g. 9.80665 for Livox)"
+  # TF config
+  imu_frame_id:
+    type: string
+    default_value: "imu"
+    description: "IMU frame ID"
+  lidar_frame_id:
+    type: string
+    default_value: "lidar"
+    description: "LiDAR frame ID"
+  base_frame_id:
+    type: string
+    default_value: ""
+    description: "Base frame ID; if blank, IMU frame ID is used"
+  odom_frame_id:
+    type: string
+    default_value: "odom"
+    description: "Odometry frame ID"
+  map_frame_id:
+    type: string
+    default_value: "map"
+    description: "Map frame ID"
+  publish_imu2lidar:
+    type: bool
+    default_value: true
+    description: "If false, do not publish imu -> lidar TF"
+  # Extension modules
+  extension_modules:
+    type: string_array
+    default_value: ["libmemory_monitor.so", "libstandard_viewer.so", "librviz_viewer.so"]
+    description: "List of extension modules to load"
+  # Topics
+  imu_topic:
+    type: string
+    default_value: "/livox/imu"
+    description: "IMU topic"
+  points_topic:
+    type: string
+    default_value: "/livox/lidar"
+    description: "Points (point cloud) topic"
+  image_topic:
+    type: string
+    default_value: "/image"
+    description: "Image topic (for extension modules)"
+  intensity_field:
+    type: string
+    default_value: "intensity"
+    description: "Intensity field name"
+  ring_field:
+    type: string
+    default_value: "intensity"
+    description: "Ring field name"
