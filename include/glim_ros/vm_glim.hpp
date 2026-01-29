@@ -9,11 +9,12 @@
 
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #ifdef BUILD_WITH_CV_BRIDGE
 #include <image_transport/image_transport.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #endif
-
+#include <open3d/Open3D.h>
 namespace glim {
 class TimeKeeper;
 class CloudPreprocessor;
@@ -37,7 +38,6 @@ public:
   void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg);
 #endif
   size_t points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
-
   void wait(bool auto_quit = false);
   void save(const std::string& path);
 
@@ -71,6 +71,9 @@ private:
   rclcpp::TimerBase::SharedPtr timer;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr points_sub;
+  //rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr points_pub_;
+  //rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;
+  rclcpp::Time last_map_pub_time_;
 #ifdef BUILD_WITH_CV_BRIDGE
   image_transport::Subscriber image_sub;
 #endif

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(glim_ros VERSION 1.2.0 LANGUAGES CXX)
+project(glim_ros VERSION 1.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/cmake")
@@ -18,6 +18,13 @@ ament_auto_find_build_dependencies()
 
 find_package(generate_parameter_library REQUIRED)
 find_package(glim REQUIRED)
+
+find_package(Open3D HINTS ${CMAKE_INSTALL_PREFIX}/lib/CMake)
+list(APPEND Open3D_LIBRARIES dl)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${Open3D_C_FLAGS}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${Open3D_CXX_FLAGS}")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${Open3D_EXE_LINKER_FLAGS}")
+link_directories(${Open3D_LIBRARY_DIRS})
 
 generate_parameter_library(vm_glim_parameters
   params/vm_glim_parameters.yaml
@@ -57,6 +64,7 @@ target_include_directories(glim_ros PUBLIC
 )
 target_link_libraries(glim_ros
   glim::glim
+  ${Open3D_LIBRARIES}
 )
 rclcpp_components_register_nodes(glim_ros "glim::GlimROS")
 
@@ -75,6 +83,7 @@ target_include_directories(vm_glim PUBLIC
 target_link_libraries(vm_glim
   glim::glim
   vm_glim_parameters
+  ${Open3D_LIBRARIES}
 )
 rclcpp_components_register_nodes(vm_glim "glim::VMGlim")
 

@@ -32,11 +32,14 @@
 #include <glim/util/extension_module.hpp>
 #include <glim/util/extension_module_ros2.hpp>
 #include <glim/preprocess/cloud_preprocessor.hpp>
+#include <glim/odometry/estimation_frame.hpp>
 #include <glim/odometry/async_odometry_estimation.hpp>
 #include <glim/mapping/async_sub_mapping.hpp>
 #include <glim/mapping/async_global_mapping.hpp>
 #include <glim_ros/ros_compatibility.hpp>
 #include <glim_ros/ros_qos.hpp>
+
+#include <open3d/Open3D.h>
 
 namespace glim {
 
@@ -174,6 +177,17 @@ VMGlim::VMGlim(const rclcpp::NodeOptions& options) : Node("vm_glim", options) {
 
   qos = get_qos_settings(config_ros, "glim_ros", "points_qos");
   points_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>(points_topic, qos, std::bind(&VMGlim::points_callback, this, _1));
+
+  // PointCloud2 publisher (same data as glim viewer / rviz_viewer ~/points)
+  //points_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("~/points", 10);
+
+  // Global map publisher (merged submaps in map frame; throttled)
+  rclcpp::QoS map_qos(rclcpp::KeepLast(1));
+  map_qos.reliable();
+  map_qos.transient_local();
+  //map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("~/map", map_qos);
+  last_map_pub_time_ = this->now();
+
 #ifdef BUILD_WITH_CV_BRIDGE
   qos = get_qos_settings(config_ros, "glim_ros", "image_qos");
   image_sub = image_transport::create_subscription(this, image_topic, std::bind(&VMGlim::image_callback, this, _1), "raw", qos.get_rmw_qos_profile());
@@ -302,6 +316,38 @@ void VMGlim::timer_callback() {
   std::vector<glim::EstimationFrame::ConstPtr> marginalized_frames;
   odometry_estimation->get_results(estimation_frames, marginalized_frames);
 
+  // Publish latest scan as PointCloud2 (similar to glim viewer / rviz_viewer)
+  // if (points_pub_->get_subscription_count() > 0 && !estimation_frames.empty() && estimation_frames.back()->frame) {
+  //   const auto& new_frame = estimation_frames.back();
+  //   std::string frame_id_str;
+  //   switch (new_frame->frame_id) {
+  //     case glim::FrameID::LIDAR:
+  //       frame_id_str = params_.lidar_frame_id;
+  //       break;
+  //     case glim::FrameID::IMU:
+  //       frame_id_str = params_.imu_frame_id;
+  //       break;
+  //     case glim::FrameID::WORLD:
+  //       frame_id_str = params_.map_frame_id;
+  //       break;
+  //   }
+  //   auto points_msg = glim::frame_to_pointcloud2(frame_id_str, new_frame->stamp, *new_frame->frame);
+  //   points_pub_->publish(*points_msg);
+  // }
+
+  // Publish global map (throttled; expensive)
+  // if (global_mapping && map_pub_->get_subscription_count() > 0) {
+  //   const rclcpp::Time now = this->now();
+  //   if ((now - last_map_pub_time_).seconds() >= 10.0) {
+  //     last_map_pub_time_ = now;
+  //     auto global_points = global_mapping->export_points();
+  //     if (global_points && global_points->size() > 0) {
+  //       auto map_msg = glim::frame_to_pointcloud2(params_.map_frame_id, now.seconds(), *global_points);
+  //       map_pub_->publish(*map_msg);
+  //     }
+  //   }
+  // }
+
   if (sub_mapping) {
     for (const auto& frame : marginalized_frames) {
       sub_mapping->insert_frame(frame);
@@ -352,7 +398,31 @@ void VMGlim::wait(bool auto_quit) {
 }
 
 void VMGlim::save(const std::string& path) {
-  if (global_mapping) global_mapping->save(path);
+  if (global_mapping) {
+    global_mapping->save(path);
+    auto global_points = global_mapping->export_points();
+    if (global_points && global_points->size() > 0) {
+      open3d::geometry::PointCloud pcd;
+      pcd.points_.resize(global_points->size());
+      for (size_t i = 0; i < global_points->size(); ++i) {
+        pcd.points_[i] = global_points->points[i].head<3>().cast<double>();
+      }
+      if (global_points->intensities) {
+        pcd.colors_.resize(global_points->size());
+        for (size_t i = 0; i < global_points->size(); ++i) {
+          const double v = global_points->intensities[i];
+          const double vn = std::max(0., std::min(1., v / 255.));
+          pcd.colors_[i] = Eigen::Vector3d(vn, vn, vn);
+        }
+      }
+      const std::string ply_path = path + "/global_map.ply";
+      if (open3d::io::WritePointCloud(ply_path, pcd)) {
+        spdlog::info("saved global map to {}", ply_path);
+      } else {
+        spdlog::warn("failed to write PLY to {}", ply_path);
+      }
+    }
+  }
   for (auto& module : extension_modules) {
     module->at_exit(path);
   }
