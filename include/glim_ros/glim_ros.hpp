@@ -7,6 +7,7 @@
 
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <livox_ros_driver2/msg/custom_msg.hpp>
 #ifdef BUILD_WITH_CV_BRIDGE
 #include <image_transport/image_transport.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -35,6 +36,7 @@ public:
   void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg);
 #endif
   size_t points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
+  size_t livox_custom_callback(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr msg);
 
   void wait(bool auto_quit = false);
   void save(const std::string& path);
@@ -53,6 +55,10 @@ private:
   double imu_time_offset;
   double points_time_offset;
   double acc_scale;
+  double min_lidar_frame_interval;
+  int min_points_to_process;
+  double last_processed_points_stamp;
+  int processed_frame_count;  ///< Number of lidar frames successfully processed so far
   bool dump_on_unload;
 
   std::string intensity_field, ring_field;
@@ -65,6 +71,7 @@ private:
   rclcpp::TimerBase::SharedPtr timer;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr points_sub;
+  rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub;
 #ifdef BUILD_WITH_CV_BRIDGE
   image_transport::Subscriber image_sub;
 #endif

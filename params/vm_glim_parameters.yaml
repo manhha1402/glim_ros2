@@ -40,8 +40,16 @@ vm_glim:
     description: "Time offset for point cloud data (seconds)"
   acc_scale:
     type: double
-    default_value: 1.0
-    description: "Accelerometer scale factor (e.g. 9.80665 for Livox)"
+    default_value: 9.80665
+    description: "Accelerometer scale factor. Use 9.80665 for Livox (accel in g -> m/s^2)"
+  min_lidar_frame_interval:
+    type: double
+    default_value: 0.05
+    description: "Skip lidar frames arriving within this many seconds of previous (0.05 for Livox chunked PointCloud2)"
+  min_points_to_process:
+    type: int
+    default_value: 200
+    description: "Skip lidar frames with fewer raw points than this (200 to skip 96-pt chunks)"
   # TF config
   imu_frame_id:
     type: string
@@ -73,6 +81,10 @@ vm_glim:
     default_value: ["libmemory_monitor.so", "libstandard_viewer.so", "librviz_viewer.so"]
     description: "List of extension modules to load"
   # Topics
+  points_msg_type:
+    type: string
+    default_value: "LivoxCustomMsg"
+    description: "Point cloud message type: PointCloud2 or LivoxCustomMsg. Use LivoxCustomMsg for Livox bags."
   imu_topic:
     type: string
     default_value: "/livox/imu"

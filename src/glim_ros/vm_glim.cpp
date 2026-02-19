@@ -20,6 +20,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <livox_ros_driver2/msg/custom_msg.hpp>
 
 #include <gtsam_points/optimizers/linearization_hook.hpp>
 #include <gtsam_points/cuda/nonlinear_factor_set_gpu_create.hpp>
@@ -67,10 +68,14 @@ VMGlim::VMGlim(const rclcpp::NodeOptions& options) : Node("vm_glim", options) {
   glim::GlobalConfig::instance(config_path);
   glim::Config config_ros(glim::GlobalConfig::get_config_path("config_ros"));
 
-  keep_raw_points = params_.keep_raw_points; //config_ros.param<bool>("glim_ros", "keep_raw_points", false);
-  imu_time_offset = params_.imu_time_offset; //config_ros.param<double>("glim_ros", "imu_time_offset", 0.0);
-  points_time_offset = params_.points_time_offset; //config_ros.param<double>("glim_ros", "points_time_offset", 0.0);
-  acc_scale = params_.acc_scale; //config_ros.param<double>("glim_ros", "acc_scale", 1.0);
+  keep_raw_points = params_.keep_raw_points;
+  imu_time_offset = params_.imu_time_offset;
+  points_time_offset = params_.points_time_offset;
+  acc_scale = params_.acc_scale;
+  min_lidar_frame_interval = params_.min_lidar_frame_interval;
+  min_points_to_process = params_.min_points_to_process;
+  last_processed_points_stamp = -1.0;
+  processed_frame_count = 0;
 
   //glim::Config config_sensors(glim::GlobalConfig::get_config_path("config_sensors"));
   intensity_field = params_.intensity_field; //config_sensors.param<std::string>("sensors", "intensity_field", "intensity");
@@ -176,7 +181,13 @@ VMGlim::VMGlim(const rclcpp::NodeOptions& options) : Node("vm_glim", options) {
   imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, qos, std::bind(&VMGlim::imu_callback, this, _1));
 
   qos = get_qos_settings(config_ros, "glim_ros", "points_qos");
-  points_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>(points_topic, qos, std::bind(&VMGlim::points_callback, this, _1));
+  if (params_.points_msg_type == "LivoxCustomMsg") {
+    spdlog::info("subscribing to Livox CustomMsg on {}", points_topic);
+    livox_sub = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+        points_topic, qos, std::bind(&VMGlim::livox_custom_callback, this, _1));
+  } else {
+    points_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>(points_topic, qos, std::bind(&VMGlim::points_callback, this, _1));
+  }
 
   // PointCloud2 publisher (same data as glim viewer / rviz_viewer ~/points)
   //points_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("~/points", 10);
@@ -273,13 +284,30 @@ size_t VMGlim::points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedP
     spdlog::warn("failed to extract points from message");
     return 0;
   }
-
-  raw_points->stamp += points_time_offset;
-  if (!time_keeper->process(raw_points)) {
-    spdlog::warn("skip an invalid point cloud (stamp={})", raw_points->stamp);
+  if (min_points_to_process > 0 && static_cast<int>(raw_points->size()) < min_points_to_process) {
+    spdlog::debug("skip sparse PointCloud2 frame ({} < {} points)", raw_points->size(), min_points_to_process);
     return 0;
   }
+  const double frame_stamp = raw_points->stamp;
+  if (min_lidar_frame_interval > 0 && last_processed_points_stamp >= 0 &&
+      (frame_stamp - last_processed_points_stamp) < min_lidar_frame_interval) {
+    spdlog::debug("skip rapid PointCloud2 frame (interval={:.4f}s < {:.4f}s)",
+                  frame_stamp - last_processed_points_stamp, min_lidar_frame_interval);
+    return 0;
+  }
+
+  raw_points->stamp += points_time_offset;
+  raw_points->frame_index = processed_frame_count;
+  if (!time_keeper->process(raw_points)) {
+    spdlog::warn("skip an invalid point cloud (stamp={}, frame_index={})", raw_points->stamp, raw_points->frame_index);
+    return 0;
+  }
+  processed_frame_count++;
   auto preprocessed = preprocessor->preprocess(raw_points);
+  if (preprocessed == nullptr) {
+    spdlog::warn("skipping point cloud (preprocessing returned null, stamp={})", raw_points->stamp);
+    return 0;
+  }
 
   if (keep_raw_points) {
     // note: Raw points are used only in extension modules for visualization purposes.
@@ -288,10 +316,74 @@ size_t VMGlim::points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedP
   }
 
   odometry_estimation->insert_frame(preprocessed);
+  last_processed_points_stamp = frame_stamp;
 
   const size_t workload = odometry_estimation->workload();
   spdlog::debug("workload={}", workload);
 
+  return workload;
+}
+
+namespace {
+RawPoints::Ptr extract_raw_points_from_livox(const livox_ros_driver2::msg::CustomMsg& msg) {
+  auto raw = std::make_shared<RawPoints>();
+  raw->stamp = static_cast<double>(msg.timebase) / 1e9;
+  raw->frame_id = msg.header.frame_id;
+  const size_t n = msg.points.size();
+  raw->points.resize(n);
+  raw->times.resize(n);
+  raw->intensities.resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    const auto& p = msg.points[i];
+    raw->points[i] << p.x, p.y, p.z, 1.0;
+    raw->times[i] = static_cast<double>(p.offset_time) / 1e9;
+    raw->intensities[i] = static_cast<double>(p.reflectivity);
+  }
+  return raw;
+}
+}  // namespace
+
+size_t VMGlim::livox_custom_callback(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr msg) {
+  spdlog::trace("livox: {}.{}", msg->header.stamp.sec, msg->header.stamp.nanosec);
+
+  auto raw_points = extract_raw_points_from_livox(*msg);
+  if (raw_points->size() == 0) {
+    spdlog::warn("Livox CustomMsg has no points");
+    return 0;
+  }
+  if (min_points_to_process > 0 && static_cast<int>(raw_points->size()) < min_points_to_process) {
+    spdlog::debug("skip sparse Livox frame ({} < {} points)", raw_points->size(), min_points_to_process);
+    return 0;
+  }
+  const double frame_stamp = raw_points->stamp;
+  if (min_lidar_frame_interval > 0 && last_processed_points_stamp >= 0 &&
+      (frame_stamp - last_processed_points_stamp) < min_lidar_frame_interval) {
+    spdlog::debug("skip rapid Livox frame (interval={:.4f}s < {:.4f}s)",
+                  frame_stamp - last_processed_points_stamp, min_lidar_frame_interval);
+    return 0;
+  }
+
+  raw_points->stamp += points_time_offset;
+  raw_points->frame_index = processed_frame_count;
+  if (!time_keeper->process(raw_points)) {
+    spdlog::warn("skip an invalid point cloud (stamp={}, frame_index={})", raw_points->stamp, raw_points->frame_index);
+    return 0;
+  }
+  processed_frame_count++;
+  auto preprocessed = preprocessor->preprocess(raw_points);
+  if (preprocessed == nullptr) {
+    spdlog::warn("skipping point cloud (preprocessing returned null, stamp={})", raw_points->stamp);
+    return 0;
+  }
+
+  if (keep_raw_points) {
+    preprocessed->raw_points = raw_points;
+  }
+
+  odometry_estimation->insert_frame(preprocessed);
+  last_processed_points_stamp = frame_stamp;
+  const size_t workload = odometry_estimation->workload();
+  spdlog::debug("workload={}", workload);
   return workload;
 }
 

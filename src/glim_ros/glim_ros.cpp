@@ -19,6 +19,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <livox_ros_driver2/msg/custom_msg.hpp>
 
 #include <gtsam_points/optimizers/linearization_hook.hpp>
 #include <gtsam_points/cuda/nonlinear_factor_set_gpu_create.hpp>
@@ -36,6 +37,7 @@
 #include <glim/mapping/async_global_mapping.hpp>
 #include <glim_ros/ros_compatibility.hpp>
 #include <glim_ros/ros_qos.hpp>
+#include <open3d/Open3D.h>
 
 namespace glim {
 
@@ -83,6 +85,10 @@ GlimROS::GlimROS(const rclcpp::NodeOptions& options) : Node("glim_ros", options)
   imu_time_offset = config_ros.param<double>("glim_ros", "imu_time_offset", 0.0);
   points_time_offset = config_ros.param<double>("glim_ros", "points_time_offset", 0.0);
   acc_scale = config_ros.param<double>("glim_ros", "acc_scale", 1.0);
+  min_lidar_frame_interval = config_ros.param<double>("glim_ros", "min_lidar_frame_interval", 0.0);
+  min_points_to_process = config_ros.param<int>("glim_ros", "min_points_to_process", 0);
+  last_processed_points_stamp = -1.0;
+  processed_frame_count = 0;
 
   glim::Config config_sensors(glim::GlobalConfig::get_config_path("config_sensors"));
   intensity_field = config_sensors.param<std::string>("sensors", "intensity_field", "intensity");
@@ -177,6 +183,7 @@ GlimROS::GlimROS(const rclcpp::NodeOptions& options) : Node("glim_ros", options)
   using std::placeholders::_1;
   const std::string imu_topic = config_ros.param<std::string>("glim_ros", "imu_topic", "");
   const std::string points_topic = config_ros.param<std::string>("glim_ros", "points_topic", "");
+  const std::string points_msg_type = config_ros.param<std::string>("glim_ros", "points_msg_type", "PointCloud2");
   const std::string image_topic = config_ros.param<std::string>("glim_ros", "image_topic", "");
 
   // Subscribers
@@ -186,7 +193,13 @@ GlimROS::GlimROS(const rclcpp::NodeOptions& options) : Node("glim_ros", options)
   imu_sub = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, qos, std::bind(&GlimROS::imu_callback, this, _1));
 
   qos = get_qos_settings(config_ros, "glim_ros", "points_qos");
-  points_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>(points_topic, qos, std::bind(&GlimROS::points_callback, this, _1));
+  if (points_msg_type == "LivoxCustomMsg") {
+    spdlog::info("subscribing to Livox CustomMsg on {}", points_topic);
+    livox_sub = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+        points_topic, qos, std::bind(&GlimROS::livox_custom_callback, this, _1));
+  } else {
+    points_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>(points_topic, qos, std::bind(&GlimROS::points_callback, this, _1));
+  }
 #ifdef BUILD_WITH_CV_BRIDGE
   qos = get_qos_settings(config_ros, "glim_ros", "image_qos");
   image_sub = image_transport::create_subscription(this, image_topic, std::bind(&GlimROS::image_callback, this, _1), "raw", qos.get_rmw_qos_profile());
@@ -256,6 +269,69 @@ void GlimROS::image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg) 
 }
 #endif
 
+namespace {
+RawPoints::Ptr extract_raw_points_from_livox(const livox_ros_driver2::msg::CustomMsg& msg) {
+  auto raw = std::make_shared<RawPoints>();
+  raw->stamp = static_cast<double>(msg.timebase) / 1e9;
+  raw->frame_id = msg.header.frame_id;
+  const size_t n = msg.points.size();
+  raw->points.resize(n);
+  raw->times.resize(n);
+  raw->intensities.resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    const auto& p = msg.points[i];
+    raw->points[i] << p.x, p.y, p.z, 1.0;
+    raw->times[i] = static_cast<double>(p.offset_time) / 1e9;
+    raw->intensities[i] = static_cast<double>(p.reflectivity);
+  }
+  return raw;
+}
+}  // namespace
+
+size_t GlimROS::livox_custom_callback(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr msg) {
+  spdlog::trace("livox: {}.{}", msg->header.stamp.sec, msg->header.stamp.nanosec);
+
+  auto raw_points = extract_raw_points_from_livox(*msg);
+  if (raw_points->size() == 0) {
+    spdlog::warn("Livox CustomMsg has no points");
+    return 0;
+  }
+  if (min_points_to_process > 0 && static_cast<int>(raw_points->size()) < min_points_to_process) {
+    spdlog::debug("skip sparse Livox frame ({} < {} points)", raw_points->size(), min_points_to_process);
+    return 0;
+  }
+  const double frame_stamp = raw_points->stamp;
+  if (min_lidar_frame_interval > 0 && last_processed_points_stamp >= 0 &&
+      (frame_stamp - last_processed_points_stamp) < min_lidar_frame_interval) {
+    spdlog::debug("skip rapid Livox frame (interval={:.4f}s < {:.4f}s)",
+                  frame_stamp - last_processed_points_stamp, min_lidar_frame_interval);
+    return 0;
+  }
+
+  raw_points->stamp += points_time_offset;
+  raw_points->frame_index = processed_frame_count;
+  if (!time_keeper->process(raw_points)) {
+    spdlog::warn("skip an invalid point cloud (stamp={}, frame_index={})", raw_points->stamp, raw_points->frame_index);
+    return 0;
+  }
+  processed_frame_count++;
+  auto preprocessed = preprocessor->preprocess(raw_points);
+  if (preprocessed == nullptr) {
+    spdlog::warn("skipping point cloud (preprocessing returned null, stamp={})", raw_points->stamp);
+    return 0;
+  }
+
+  if (keep_raw_points) {
+    preprocessed->raw_points = raw_points;
+  }
+
+  odometry_estimation->insert_frame(preprocessed);
+  last_processed_points_stamp = frame_stamp;
+  const size_t workload = odometry_estimation->workload();
+  spdlog::debug("workload={}", workload);
+  return workload;
+}
+
 size_t GlimROS::points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
   spdlog::trace("points: {}.{}", msg->header.stamp.sec, msg->header.stamp.nanosec);
 
@@ -264,13 +340,30 @@ size_t GlimROS::points_callback(const sensor_msgs::msg::PointCloud2::ConstShared
     spdlog::warn("failed to extract points from message");
     return 0;
   }
-
-  raw_points->stamp += points_time_offset;
-  if (!time_keeper->process(raw_points)) {
-    spdlog::warn("skip an invalid point cloud (stamp={})", raw_points->stamp);
+  if (min_points_to_process > 0 && static_cast<int>(raw_points->size()) < min_points_to_process) {
+    spdlog::debug("skip sparse PointCloud2 frame ({} < {} points)", raw_points->size(), min_points_to_process);
     return 0;
   }
+  const double frame_stamp = raw_points->stamp;
+  if (min_lidar_frame_interval > 0 && last_processed_points_stamp >= 0 &&
+      (frame_stamp - last_processed_points_stamp) < min_lidar_frame_interval) {
+    spdlog::debug("skip rapid PointCloud2 frame (interval={:.4f}s < {:.4f}s)",
+                  frame_stamp - last_processed_points_stamp, min_lidar_frame_interval);
+    return 0;
+  }
+
+  raw_points->stamp += points_time_offset;
+  raw_points->frame_index = processed_frame_count;
+  if (!time_keeper->process(raw_points)) {
+    spdlog::warn("skip an invalid point cloud (stamp={}, frame_index={})", raw_points->stamp, raw_points->frame_index);
+    return 0;
+  }
+  processed_frame_count++;
   auto preprocessed = preprocessor->preprocess(raw_points);
+  if (preprocessed == nullptr) {
+    spdlog::warn("skipping point cloud (preprocessing returned null, stamp={})", raw_points->stamp);
+    return 0;
+  }
 
   if (keep_raw_points) {
     // note: Raw points are used only in extension modules for visualization purposes.
@@ -279,6 +372,7 @@ size_t GlimROS::points_callback(const sensor_msgs::msg::PointCloud2::ConstShared
   }
 
   odometry_estimation->insert_frame(preprocessed);
+  last_processed_points_stamp = frame_stamp;
 
   const size_t workload = odometry_estimation->workload();
   spdlog::debug("workload={}", workload);
@@ -357,7 +451,31 @@ void GlimROS::wait(bool auto_quit) {
 }
 
 void GlimROS::save(const std::string& path) {
-  if (global_mapping) global_mapping->save(path);
+  if (global_mapping) {
+    global_mapping->save(path);
+    auto global_points = global_mapping->export_points();
+    if (global_points && global_points->size() > 0) {
+      open3d::geometry::PointCloud pcd;
+      pcd.points_.resize(global_points->size());
+      for (size_t i = 0; i < global_points->size(); ++i) {
+        pcd.points_[i] = global_points->points[i].head<3>().cast<double>();
+      }
+      if (global_points->intensities) {
+        pcd.colors_.resize(global_points->size());
+        for (size_t i = 0; i < global_points->size(); ++i) {
+          const double v = global_points->intensities[i];
+          const double vn = std::max(0., std::min(1., v / 255.));
+          pcd.colors_[i] = Eigen::Vector3d(vn, vn, vn);
+        }
+      }
+      const std::string ply_path = path + "/global_map.ply";
+      if (open3d::io::WritePointCloud(ply_path, pcd)) {
+        spdlog::info("saved global map to {}", ply_path);
+      } else {
+        spdlog::warn("failed to write PLY to {}", ply_path);
+      }
+    }
+  }
   for (auto& module : extension_modules) {
     module->at_exit(path);
   }

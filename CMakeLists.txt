@@ -14,12 +14,12 @@ option(BUILD_WITH_VIEWER "Build with visualizer" ON)
 option(BUILD_WITH_CV_BRIDGE "Build with cv_bridge which enables support for processing of camera images" ON)
 
 find_package(ament_cmake_auto REQUIRED)
+# Find Open3D before ament_auto to avoid duplicate JsonCpp::JsonCpp (livox_ros_driver2 pulls JsonCpp)
+find_package(Open3D HINTS ${CMAKE_INSTALL_PREFIX}/lib/CMake)
 ament_auto_find_build_dependencies()
 
 find_package(generate_parameter_library REQUIRED)
 find_package(glim REQUIRED)
-
-find_package(Open3D HINTS ${CMAKE_INSTALL_PREFIX}/lib/CMake)
 list(APPEND Open3D_LIBRARIES dl)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${Open3D_C_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${Open3D_CXX_FLAGS}")
