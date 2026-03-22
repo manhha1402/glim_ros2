@@ -3,6 +3,8 @@
 #include <any>
 #include <deque>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <rclcpp/rclcpp.hpp>
 
 #include <glim_ros/vm_glim_parameters.hpp>
@@ -63,6 +65,12 @@ private:
   int processed_frame_count;
   bool dump_on_unload;
 
+  // Scan recording (LC-corrected submaps)
+  bool save_scans_;
+  std::string save_scans_path_;
+  std::set<int> saved_submap_ids_;
+  std::mutex save_mutex_;
+
   std::shared_ptr<vm_glim::ParamListener> param_listener_;
   vm_glim::Params params_;
   rclcpp::TimerBase::SharedPtr timer_;
@@ -78,8 +86,8 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr points_sub;
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub;
-  //rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr points_pub_;
-  //rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;
+  // rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr points_pub_;
+  // rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;
   rclcpp::Time last_map_pub_time_;
 #ifdef BUILD_WITH_CV_BRIDGE
   image_transport::Subscriber image_sub;

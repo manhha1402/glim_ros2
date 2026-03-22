@@ -105,3 +105,12 @@ vm_glim:
     type: string
     default_value: "intensity"
     description: "Ring field name"
+  # Scan recording
+  save_scans:
+    type: bool
+    default_value: false
+    description: "Save each finalized LiDAR frame (in world frame) as a .ply file and append pose to poses.txt for offline scene reconstruction"
+  save_scans_path:
+    type: string
+    default_value: "/tmp/glim_scans"
+    description: "Directory to write frame_XXXXXX.ply files and poses.txt when save_scans is enabled"

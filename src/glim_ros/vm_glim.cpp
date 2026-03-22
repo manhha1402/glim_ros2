@@ -4,9 +4,12 @@
 #define GLIM_ROS2
 
 #include <deque>
+#include <fstream>
+#include <iomanip>
 #include <thread>
 #include <iostream>
 #include <functional>
+#include <filesystem>
 #include <boost/format.hpp>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
@@ -37,6 +40,7 @@
 #include <glim/odometry/async_odometry_estimation.hpp>
 #include <glim/mapping/async_sub_mapping.hpp>
 #include <glim/mapping/async_global_mapping.hpp>
+#include <glim/mapping/callbacks.hpp>
 #include <glim_ros/ros_compatibility.hpp>
 #include <glim_ros/ros_qos.hpp>
 
@@ -45,17 +49,71 @@
 namespace glim {
 
 VMGlim::VMGlim(const rclcpp::NodeOptions& options) : Node("vm_glim", options) {
-
-
   param_listener_ = std::make_shared<vm_glim::ParamListener>(this);
   params_ = param_listener_->get_params();
-
-
 
   dump_on_unload = params_.dump_on_unload;
 
   if (dump_on_unload) {
     spdlog::info("dump_on_unload={}", dump_on_unload);
+  }
+
+  save_scans_ = params_.save_scans;
+  save_scans_path_ = params_.save_scans_path;
+
+  if (save_scans_) {
+    std::filesystem::create_directories(save_scans_path_);
+    spdlog::info("save_scans enabled: writing LC-corrected submaps to {}", save_scans_path_);
+
+    // Register callback: fires after every global optimization (including loop closures).
+    // submap->T_world_origin is the LC-corrected pose; submap->frame holds the merged
+    // point cloud in the submap-origin frame (never dropped by global mapping).
+    GlobalMappingCallbacks::on_update_submaps.add([this](const std::vector<SubMap::Ptr>& submaps) {
+      std::lock_guard<std::mutex> lock(save_mutex_);
+
+      for (const auto& submap : submaps) {
+        if (!submap->frame || submap->frame->num_points == 0) {
+          continue;
+        }
+
+        // Save PLY once per submap (points are in submap-origin frame, unchanged by LC)
+        if (!saved_submap_ids_.count(submap->id)) {
+          open3d::geometry::PointCloud o3d_pcd;
+          o3d_pcd.points_.resize(submap->frame->num_points);
+          for (size_t i = 0; i < submap->frame->num_points; ++i) {
+            o3d_pcd.points_[i] = submap->frame->points[i].head<3>();
+          }
+          if (submap->frame->intensities) {
+            o3d_pcd.colors_.resize(submap->frame->num_points);
+            for (size_t i = 0; i < submap->frame->num_points; ++i) {
+              const double v = std::max(0.0, std::min(1.0, submap->frame->intensities[i] / 255.0));
+              o3d_pcd.colors_[i] = Eigen::Vector3d(v, v, v);
+            }
+          }
+          const std::string ply_path = save_scans_path_ + "/submap_" + std::to_string(submap->id) + ".ply";
+          if (open3d::io::WritePointCloud(ply_path, o3d_pcd)) {
+            saved_submap_ids_.insert(submap->id);
+          } else {
+            spdlog::warn("save_scans: failed to write {}", ply_path);
+          }
+        }
+      }
+
+      // Overwrite poses.txt with the latest LC-corrected T_world_origin for every saved submap.
+      // Reconstruction: p_world = T_world_origin * p_submap_origin (from PLY)
+      std::ofstream poses_file(save_scans_path_ + "/poses.txt", std::ios::trunc);
+      poses_file << "# submap_id  tx ty tz  qx qy qz qw  (T_world_origin, LC-corrected)\n";
+      for (const auto& submap : submaps) {
+        if (!saved_submap_ids_.count(submap->id)) {
+          continue;
+        }
+        const Eigen::Quaterniond q(submap->T_world_origin.rotation());
+        const Eigen::Vector3d t(submap->T_world_origin.translation());
+        poses_file << submap->id << " " << std::fixed << std::setprecision(9) << t.x() << " " << t.y() << " " << t.z() << " " << q.x() << " " << q.y() << " " << q.z() << " "
+                   << q.w() << "\n";
+      }
+      spdlog::info("save_scans: updated poses.txt ({} submaps)", saved_submap_ids_.size());
+    });
   }
 
   std::string config_path = params_.config_path;
@@ -77,9 +135,9 @@ VMGlim::VMGlim(const rclcpp::NodeOptions& options) : Node("vm_glim", options) {
   last_processed_points_stamp = -1.0;
   processed_frame_count = 0;
 
-  //glim::Config config_sensors(glim::GlobalConfig::get_config_path("config_sensors"));
-  intensity_field = params_.intensity_field; //config_sensors.param<std::string>("sensors", "intensity_field", "intensity");
-  ring_field = params_.ring_field; //config_sensors.param<std::string>("sensors", "ring_field", "");
+  // glim::Config config_sensors(glim::GlobalConfig::get_config_path("config_sensors"));
+  intensity_field = params_.intensity_field;  // config_sensors.param<std::string>("sensors", "intensity_field", "intensity");
+  ring_field = params_.ring_field;            // config_sensors.param<std::string>("sensors", "ring_field", "");
 
   // Setup GPU-based linearization
 #ifdef BUILD_GTSAM_POINTS_GPU
@@ -103,7 +161,7 @@ VMGlim::VMGlim(const rclcpp::NodeOptions& options) : Node("vm_glim", options) {
   odometry_estimation.reset(new glim::AsyncOdometryEstimation(odom, odom->requires_imu()));
 
   // Sub mapping
-  //if (config_ros.param<bool>("glim_ros", "enable_local_mapping", true)) {
+  // if (config_ros.param<bool>("glim_ros", "enable_local_mapping", true)) {
   if (params_.enable_local_mapping) {
     const std::string sub_mapping_so_name =
       glim::Config(glim::GlobalConfig::get_config_path("config_sub_mapping")).param<std::string>("sub_mapping", "so_name", "libsub_mapping.so");
@@ -117,7 +175,7 @@ VMGlim::VMGlim(const rclcpp::NodeOptions& options) : Node("vm_glim", options) {
   }
 
   // Global mapping
-  //if (config_ros.param<bool>("glim_ros", "enable_global_mapping", true)) {
+  // if (config_ros.param<bool>("glim_ros", "enable_global_mapping", true)) {
   if (params_.enable_global_mapping) {
     const std::string global_mapping_so_name =
       glim::Config(glim::GlobalConfig::get_config_path("config_global_mapping")).param<std::string>("global_mapping", "so_name", "libglobal_mapping.so");
@@ -170,9 +228,9 @@ VMGlim::VMGlim(const rclcpp::NodeOptions& options) : Node("vm_glim", options) {
 
   // ROS-related
   using std::placeholders::_1;
-  const std::string imu_topic = params_.imu_topic; //config_ros.param<std::string>("glim_ros", "imu_topic", "");
-  const std::string points_topic = params_.points_topic; //config_ros.param<std::string>("glim_ros", "points_topic", "");
-  const std::string image_topic = params_.image_topic; //config_ros.param<std::string>("glim_ros", "image_topic", "");
+  const std::string imu_topic = params_.imu_topic;        // config_ros.param<std::string>("glim_ros", "imu_topic", "");
+  const std::string points_topic = params_.points_topic;  // config_ros.param<std::string>("glim_ros", "points_topic", "");
+  const std::string image_topic = params_.image_topic;    // config_ros.param<std::string>("glim_ros", "image_topic", "");
 
   // Subscribers
   rclcpp::SensorDataQoS default_imu_qos;
@@ -183,20 +241,19 @@ VMGlim::VMGlim(const rclcpp::NodeOptions& options) : Node("vm_glim", options) {
   qos = get_qos_settings(config_ros, "glim_ros", "points_qos");
   if (params_.points_msg_type == "LivoxCustomMsg") {
     spdlog::info("subscribing to Livox CustomMsg on {}", points_topic);
-    livox_sub = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-        points_topic, qos, std::bind(&VMGlim::livox_custom_callback, this, _1));
+    livox_sub = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(points_topic, qos, std::bind(&VMGlim::livox_custom_callback, this, _1));
   } else {
     points_sub = this->create_subscription<sensor_msgs::msg::PointCloud2>(points_topic, qos, std::bind(&VMGlim::points_callback, this, _1));
   }
 
   // PointCloud2 publisher (same data as glim viewer / rviz_viewer ~/points)
-  //points_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("~/points", 10);
+  // points_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("~/points", 10);
 
   // Global map publisher (merged submaps in map frame; throttled)
   rclcpp::QoS map_qos(rclcpp::KeepLast(1));
   map_qos.reliable();
   map_qos.transient_local();
-  //map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("~/map", map_qos);
+  // map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("~/map", map_qos);
   last_map_pub_time_ = this->now();
 
 #ifdef BUILD_WITH_CV_BRIDGE
@@ -289,10 +346,8 @@ size_t VMGlim::points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedP
     return 0;
   }
   const double frame_stamp = raw_points->stamp;
-  if (min_lidar_frame_interval > 0 && last_processed_points_stamp >= 0 &&
-      (frame_stamp - last_processed_points_stamp) < min_lidar_frame_interval) {
-    spdlog::debug("skip rapid PointCloud2 frame (interval={:.4f}s < {:.4f}s)",
-                  frame_stamp - last_processed_points_stamp, min_lidar_frame_interval);
+  if (min_lidar_frame_interval > 0 && last_processed_points_stamp >= 0 && (frame_stamp - last_processed_points_stamp) < min_lidar_frame_interval) {
+    spdlog::debug("skip rapid PointCloud2 frame (interval={:.4f}s < {:.4f}s)", frame_stamp - last_processed_points_stamp, min_lidar_frame_interval);
     return 0;
   }
 
@@ -356,10 +411,8 @@ size_t VMGlim::livox_custom_callback(const livox_ros_driver2::msg::CustomMsg::Co
     return 0;
   }
   const double frame_stamp = raw_points->stamp;
-  if (min_lidar_frame_interval > 0 && last_processed_points_stamp >= 0 &&
-      (frame_stamp - last_processed_points_stamp) < min_lidar_frame_interval) {
-    spdlog::debug("skip rapid Livox frame (interval={:.4f}s < {:.4f}s)",
-                  frame_stamp - last_processed_points_stamp, min_lidar_frame_interval);
+  if (min_lidar_frame_interval > 0 && last_processed_points_stamp >= 0 && (frame_stamp - last_processed_points_stamp) < min_lidar_frame_interval) {
+    spdlog::debug("skip rapid Livox frame (interval={:.4f}s < {:.4f}s)", frame_stamp - last_processed_points_stamp, min_lidar_frame_interval);
     return 0;
   }
 
