@@ -114,3 +114,7 @@ vm_glim:
     type: string
     default_value: "/tmp/glim_scans"
     description: "Directory to write frame_XXXXXX.ply files and poses.txt when save_scans is enabled"
+  accel_input_is_g:
+    type: bool
+    default_value: true
+    description: "If true, the input acceleration is in g, otherwise in m/s^2"

@@ -15,7 +15,7 @@ option(BUILD_WITH_CV_BRIDGE "Build with cv_bridge which enables support for proc
 
 find_package(ament_cmake_auto REQUIRED)
 # Find Open3D before ament_auto to avoid duplicate JsonCpp::JsonCpp (livox_ros_driver2 pulls JsonCpp)
-find_package(Open3D HINTS ${CMAKE_INSTALL_PREFIX}/lib/CMake)
+find_package(Open3D REQUIRED HINTS ${CMAKE_INSTALL_PREFIX}/lib/CMake)
 ament_auto_find_build_dependencies()
 
 find_package(generate_parameter_library REQUIRED)
@@ -64,7 +64,7 @@ target_include_directories(glim_ros PUBLIC
 )
 target_link_libraries(glim_ros
   glim::glim
-  ${Open3D_LIBRARIES}
+  Open3D::Open3D
 )
 rclcpp_components_register_nodes(glim_ros "glim::GlimROS")
 
@@ -83,7 +83,7 @@ target_include_directories(vm_glim PUBLIC
 target_link_libraries(vm_glim
   glim::glim
   vm_glim_parameters
-  ${Open3D_LIBRARIES}
+  Open3D::Open3D
 )
 rclcpp_components_register_nodes(vm_glim "glim::VMGlim")
 

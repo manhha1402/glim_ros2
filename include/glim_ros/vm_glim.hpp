@@ -64,6 +64,8 @@ private:
   double last_processed_points_stamp;
   int processed_frame_count;
   bool dump_on_unload;
+  double raw_accel_z;
+  double max_accel_threshold;
 
   // Scan recording (LC-corrected submaps)
   bool save_scans_;

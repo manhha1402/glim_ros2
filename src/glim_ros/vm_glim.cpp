@@ -3,6 +3,7 @@
 
 #define GLIM_ROS2
 
+#include <cmath>
 #include <deque>
 #include <fstream>
 #include <iomanip>
@@ -134,7 +135,9 @@ VMGlim::VMGlim(const rclcpp::NodeOptions& options) : Node("vm_glim", options) {
   min_points_to_process = params_.min_points_to_process;
   last_processed_points_stamp = -1.0;
   processed_frame_count = 0;
-
+  raw_accel_z = params_.accel_input_is_g ? acc_scale : 9.80665 * acc_scale;
+  max_accel_threshold = params_.accel_input_is_g ? 2.5 * acc_scale : 2.5 * 9.80665 * acc_scale;
+  
   // glim::Config config_sensors(glim::GlobalConfig::get_config_path("config_sensors"));
   intensity_field = params_.intensity_field;  // config_sensors.param<std::string>("sensors", "intensity_field", "intensity");
   ring_field = params_.ring_field;            // config_sensors.param<std::string>("sensors", "ring_field", "");
@@ -299,8 +302,15 @@ void VMGlim::imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
   spdlog::trace("IMU: {}.{}", msg->header.stamp.sec, msg->header.stamp.nanosec);
 
   const double imu_stamp = msg->header.stamp.sec + msg->header.stamp.nanosec / 1e9 + imu_time_offset;
-  const Eigen::Vector3d linear_acc = acc_scale * Eigen::Vector3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
+  Eigen::Vector3d linear_acc = acc_scale * Eigen::Vector3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
   const Eigen::Vector3d angular_vel(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
+
+  const double raw_linear_acc_z = linear_acc.z();
+  if (std::abs(raw_linear_acc_z) > max_accel_threshold) {
+    // Clamp saturated raw accel-z while preserving direction.
+    linear_acc.z() = std::copysign(raw_accel_z, raw_linear_acc_z);
+    spdlog::warn("clamped saturated raw accel-z ({} > {}, clamped to {})", raw_linear_acc_z, max_accel_threshold, linear_acc.z());
+  }
 
   if (!time_keeper->validate_imu_stamp(imu_stamp)) {
     spdlog::warn("skip an invalid IMU data (stamp={})", imu_stamp);
